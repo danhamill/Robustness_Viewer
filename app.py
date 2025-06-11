@@ -3,15 +3,7 @@ import altair as alt
 import pandas as pd
 from collections import namedtuple
 import datetime
-print(alt.__version__)
-
-
-@st.cache_data
-def getFeatherData(path):
-
-    df = pd.read_feather(path)
-    
-    return df
+from pyarrow import dataset as ds
 
 def create_zone_rules(minDate, maxDate, zones, elevRange):
     
@@ -78,7 +70,7 @@ def create_zone_rules(minDate, maxDate, zones, elevRange):
 
 @st.cache_data(ttl = 24*60*60)
 def calculateDurations(outputEST):
-    durTable = outputEST.loc[outputEST.variable == 'DURATION', :]
+    durTable = outputEST.loc[outputEST.variable == 'DURATION', :].copy()
     # Original lookup dictionary
     lookup = {
         7: "07-Day",
@@ -115,7 +107,7 @@ def calculateDurations(outputEST):
     }
 
     # Map the 'value' column to the 'durations' column using the combined lookup dictionary
-    durTable.loc[:, 'durations'] = durTable.loc[:,'value'].map(lambda x: lookup.get(x, '').split(', '))
+    durTable['durations'] = durTable.loc[:,'value'].map(lambda x: lookup.get(x, '').split(', '))
 
     # Drop rows with NaN values in the 'durations' column
     durTable = durTable.loc[durTable.value>0, :]
@@ -132,11 +124,11 @@ def calculateDurations(outputEST):
 
     for duration, sub_group in durTable.groupby('durations'):
         # Create a date range with 6-hour frequency
-        idx = pd.date_range(sub_group.date.min(), sub_group.date.max(), freq="6H")
+        idx = pd.date_range(sub_group.date.min(), sub_group.date.max(), freq="6h")
 
         # Drop unnecessary columns and reindex with the new date range
         sub_group = sub_group.drop(['durations', 'variable'], axis=1)
-        sub_group = sub_group.set_index('date').reindex(idx, fill_value=-99, tolerance='1H', method='nearest')
+        sub_group = sub_group.set_index('date').reindex(idx, fill_value=-99, tolerance='1h', method='nearest')
         sub_group.index.name = 'date'
         sub_group = sub_group.reset_index()
 
@@ -224,8 +216,9 @@ zoneLookup = {
 
 estFeatherFile = f"data/{patternYear}_{scaleFactor}_{arc_spillway_config}_{dataset}_Alt3.feather"
 baselineFeatherFile = f'data/{patternYear}_{scaleFactor}_{arc_spillway_config}_baseline.feather'
-estDf = getFeatherData(estFeatherFile)
-baselineDf = getFeatherData(baselineFeatherFile)
+
+estDf = ds.dataset(estFeatherFile, format = 'feather')
+baselineDf = ds.dataset(baselineFeatherFile, format = 'feather')
 
 graphics = {}
 for reservoirName in ["ORO","NBB"]:
@@ -233,38 +226,31 @@ for reservoirName in ["ORO","NBB"]:
     elevRange = elevRangeLookup[reservoirName]
     flowRange = flowRangeLookup[reservoirName]
 
-    outputEST = estDf.loc[((estDf.pct == pct) & (estDf.Reservoir == reservoirName)),:]
+    outputEST = estDf.to_table(filter = (
+            (ds.field('Reservoir') == reservoirName) & 
+            (ds.field('pct') == pct)
+    )).to_pandas()
+    
 
-    outputEST.loc[(
-        (outputEST.variable == 'POOL-ELEV','alternative')
-        )] = "ID3-IMPERFECT"
-    outputEST.loc[(
-        (outputEST.variable == 'FIRO-TARGET','alternative')
-        )] = "FIRO-TARGET"
-    outputEST.loc[(
-        (outputEST.variable == f'{reservoirName}-OUT')
-        ),'alternative'] = f'{reservoirName}-OUT'
-    outputEST.loc[(
-        (outputEST.variable == f'{reservoirName}-IN')
-        ),'alternative'] = f'{reservoirName}-IN'
+    outputEST.loc[((outputEST.variable == 'POOL-ELEV','alternative'))] = "ID3-IMPERFECT"
+    outputEST.loc[((outputEST.variable == 'FIRO-TARGET','alternative'))] = "FIRO-TARGET"
+    outputEST.loc[((outputEST.variable == f'{reservoirName}-OUT')),'alternative'] = f'{reservoirName}-OUT'
+    outputEST.loc[((outputEST.variable == f'{reservoirName}-IN')),'alternative'] = f'{reservoirName}-IN'
 
-    outputPerfectZero = baselineDf.loc[
-        (
-            (baselineDf.alternative == "ID0")
-            & (baselineDf.reservoirName == reservoirName)
-        ),
-        :,
-    ]
-    outputPerfectOne = baselineDf.loc[
-        ((baselineDf.alternative== "ID1") & (baselineDf.reservoirName == reservoirName))
-        ,
-        :,
-    ]
-    outputPerfectThree = baselineDf.loc[
-        ((baselineDf.alternative== "ID3-PERFECT") & (baselineDf.reservoirName == reservoirName))
-        ,
-        :,
-    ]
+    outputPerfectZero = baselineDf.to_table(filter = (
+        (ds.field('reservoirName') == reservoirName) &
+        (ds.field('alternative') == "ID0")
+    )).to_pandas()
+    
+    outputPerfectOne = baselineDf.to_table(filter = (
+        (ds.field('reservoirName') == reservoirName) &
+        (ds.field('alternative') == "ID1")
+    )).to_pandas()
+
+    outputPerfectThree = baselineDf.to_table(filter = (
+        (ds.field('reservoirName') == reservoirName) &
+        (ds.field('alternative') == "ID3-PERFECT")
+    )).to_pandas()
 
     # Create a list of dataframes containing the desired variables
     dataframes = [
@@ -278,8 +264,6 @@ for reservoirName in ["ORO","NBB"]:
     # Concatenate the dataframes into a single dataframe
     elevDf = pd.concat(dataframes)
 
-    print(elevDf.alternative.unique())
-
     dataframes = [
         outputEST.loc[outputEST["variable"] == f'{reservoirName}-OUT', :],
         outputEST.loc[outputEST["variable"] == f'{reservoirName}-IN', :],
@@ -292,6 +276,13 @@ for reservoirName in ["ORO","NBB"]:
 
     flowDf = pd.concat(dataframes)
 
+    nearest = alt.selection_point(nearest=True, on="pointerover",
+    fields=["date"], empty=False)
+
+    when_near = alt.when(nearest)
+
+
+
     flowMaryDf = outputEST.loc[outputEST["variable"] == "MARYSVILLE", :]
     maryThreshold = 180000
     flowMary = alt.Chart(flowMaryDf).mark_line().encode(
@@ -300,7 +291,18 @@ for reservoirName in ["ORO","NBB"]:
                     domain=[flowMaryDf.date.min().strftime('%Y-%m-%d %H:%M'), 
                     flowMaryDf.date.max().strftime('%Y-%m-%d %H:%M')]),
         y=alt.Y('value:Q', title='Flow (cfs)').scale(domain=(0,300000)),
+
     )
+
+    rulesMary = alt.Chart(flowMaryDf
+    ).mark_rule(color="gray").encode(
+        x="date:T",
+        opacity=when_near.then(alt.value(0.3)).otherwise(alt.value(0)),
+        tooltip = [
+            alt.Tooltip('value:Q', type='quantitative', format='.0f', title = 'FLOW'),
+            alt.Tooltip('date:T', type='temporal', format='%Y-%m-%d %H:%M')
+        ]
+    ).add_params(nearest)
 
     highlightMary = flowMary.mark_line(color='red').encode(
         y2=alt.Y2(datum=maryThreshold)
@@ -308,7 +310,7 @@ for reservoirName in ["ORO","NBB"]:
         alt.datum.value > maryThreshold
     )
 
-    maryFlow = (flowMary + highlightMary).properties( title = "Marysville")#width=defaultwidth,  height=100,
+    maryFlow = (flowMary + highlightMary + rulesMary).properties( title = "Marysville")#width=defaultwidth,  height=100,
 
     flowYubaCityDf = outputEST.loc[outputEST["variable"] == "YUBA CITY", :]
     yubaThreshold = 180000
@@ -318,6 +320,8 @@ for reservoirName in ["ORO","NBB"]:
                     domain=[flowYubaCityDf.date.min().strftime('%Y-%m-%d %H:%M'), 
                     flowYubaCityDf.date.max().strftime('%Y-%m-%d %H:%M')]),
         y=alt.Y('value:Q', title='Flow (cfs)').scale(domain=(0,300000)),
+                tooltip = [alt.Tooltip('value:Q', type='quantitative', format='.0f'),
+            alt.Tooltip('date:T', type='temporal', format='%Y-%m-%d %H:%M')]
     )
 
     highlightYubaCity = flowYubaCity.mark_line(color='red').encode(
@@ -326,7 +330,17 @@ for reservoirName in ["ORO","NBB"]:
         alt.datum.value > yubaThreshold
     )
 
-    yubaFlow = (flowYubaCity + highlightYubaCity).properties(  title = "Yuba City")#width=defaultwidth, height=100,
+    rulesYuba = alt.Chart(flowYubaCityDf
+    ).mark_rule(color="gray").encode(
+        x="date:T",
+        opacity=when_near.then(alt.value(0.3)).otherwise(alt.value(0)),
+        tooltip = [
+            alt.Tooltip('value:Q', type='quantitative', format='.0f', title = 'FLOW'),
+            alt.Tooltip('date:T', type='temporal', format='%Y-%m-%d %H:%M')
+        ]
+    ).add_params(nearest)
+
+    yubaFlow = (flowYubaCity + highlightYubaCity+ rulesYuba).properties(  title = "Yuba City")#width=defaultwidth, height=100,
 
     flowNicolausDf = outputEST.loc[outputEST["variable"] == "NICOLAUS", :]
     nicolausThreshold = 320000
@@ -336,6 +350,8 @@ for reservoirName in ["ORO","NBB"]:
                     domain=[flowNicolausDf.date.min().strftime('%Y-%m-%d %H:%M'), 
                     flowNicolausDf.date.max().strftime('%Y-%m-%d %H:%M')]),
         y=alt.Y('value:Q', title='Flow (cfs)').scale(domain=(0,400000)),
+                tooltip = [alt.Tooltip('value:Q', type='quantitative', format='.0f'),
+            alt.Tooltip('date:T', type='temporal', format='%Y-%m-%d %H:%M')]
     )
 
     highlightNicolaus = flowNicolaus.mark_line(color='red').encode(
@@ -343,8 +359,17 @@ for reservoirName in ["ORO","NBB"]:
     ).transform_filter(
         alt.datum.value > nicolausThreshold
     )
+    rulesNicholas = alt.Chart(flowNicolausDf
+    ).mark_rule(color="gray").encode(
+        x="date:T",
+        opacity=when_near.then(alt.value(0.3)).otherwise(alt.value(0)),
+        tooltip = [
+            alt.Tooltip('value:Q', type='quantitative', format='.0f', title = 'FLOW'),
+            alt.Tooltip('date:T', type='temporal', format='%Y-%m-%d %H:%M')
+        ]
+    ).add_params(nearest)
 
-    nicolausFlow = (flowNicolaus + highlightNicolaus).properties(  title = "Nicolaus")#width=defaultwidth, height=100,
+    nicolausFlow = (flowNicolaus + highlightNicolaus + rulesNicholas).properties(  title = "Nicolaus")#width=defaultwidth, height=100,
 
     flowConfluenceDf = outputEST.loc[outputEST["variable"] == "CONFLUENCE", :]
     confluenceThreshold = 300000
@@ -355,6 +380,8 @@ for reservoirName in ["ORO","NBB"]:
                     domain=[flowConfluenceDf.date.min().strftime('%Y-%m-%d %H:%M'), 
                     flowConfluenceDf.date.max().strftime('%Y-%m-%d %H:%M')]),
         y=alt.Y('value:Q', title='Flow (cfs)').scale(domain=(0,400000)),
+        tooltip = [alt.Tooltip('value:Q', type='quantitative', format='.0f', title = 'FLOW'),
+            alt.Tooltip('date:T', type='temporal', format='%Y-%m-%d %H:%M')]
     )
 
     highlightConfluence = flowConfluence.mark_line(color='red').encode(
@@ -363,7 +390,17 @@ for reservoirName in ["ORO","NBB"]:
         alt.datum.value > confluenceThreshold
     )
 
-    confluenceFlow = (flowConfluence + highlightConfluence).properties( title = "Confluence")#width = defaultwidth, height=100,
+    rulesConfluence = alt.Chart(flowConfluenceDf
+    ).mark_rule(color="gray").encode(
+        x="date:T",
+        opacity=when_near.then(alt.value(0.3)).otherwise(alt.value(0)),
+        tooltip = [
+            alt.Tooltip('value:Q', type='quantitative', format='.0f', title = 'FLOW'),
+            alt.Tooltip('date:T', type='temporal', format='%Y-%m-%d %H:%M')
+        ]
+    ).add_params(nearest)
+
+    confluenceFlow = (flowConfluence + highlightConfluence + rulesConfluence).properties( title = "Confluence")#width = defaultwidth, height=100,
 
     poolPlot = alt.Chart(elevDf).mark_line().encode(
         x=alt.X('date:T', title=None).axis(format='%Y-%m-%d'
@@ -378,7 +415,9 @@ for reservoirName in ["ORO","NBB"]:
     strokeDash=alt.StrokeDash('alternative:N', title=None, scale=alt.Scale(
         domain=['ID3-IMPERFECT','FIRO-TARGET','ID0', 'ID1','ID3-PERFECT'], 
         range=[[1,0],[4,4],[1,0],[1,0],[1,0]])),
-    tooltip=['date:T', 'value:Q', 'alternative:N']
+    tooltip=[
+            alt.Tooltip(c, type="quantitative", format=".2f") for c in ['ID3-IMPERFECT','FIRO-TARGET','ID0', 'ID1','ID3-PERFECT']
+            ] + [alt.Tooltip('date:T', type = 'temporal', format = '%Y-%m-%d %H:%M')]
     ).properties(title = reservoirNamesLookup[reservoirName] )# width=defaultwidth, height=200
                  
     allZones = create_zone_rules(outputEST.date.min().strftime('%Y-%m-%d %H:%M'), outputEST.date.max().strftime('%Y-%m-%d %H:%M'), zones, elevRange)
@@ -397,19 +436,20 @@ for reservoirName in ["ORO","NBB"]:
     ).mark_rule(color="gray").encode(
         x="date:T",
         opacity=when_near.then(alt.value(0.3)).otherwise(alt.value(0)),
-        tooltip=[alt.Tooltip(c, type="quantitative", format=".2f") for c in ['ID3-IMPERFECT','FIRO-TARGET','ID0', 'ID1','ID3-PERFECT']],
+        tooltip=[
+            alt.Tooltip(c, type="quantitative", format=".2f") for c in ['ID3-IMPERFECT','FIRO-TARGET','ID0', 'ID1','ID3-PERFECT']
+            ] + [alt.Tooltip('date:T', type = 'temporal', format = '%Y-%m-%d %H:%M')],
     ).add_params(nearest)
 
 
     estElevPlot = (poolPlot +  allZones + rulesElev).resolve_scale(color='shared')
 
 
-
     durationdf = calculateDurations(outputEST)
     durationPlot = alt.Chart(durationdf).mark_bar(height=5).encode(
         x = alt.X('BeginDate:T', title=None).scale(domain = [outputEST.date.min().strftime('%Y-%m-%d %H:%M'),
                     outputEST.date.max().strftime('%Y-%m-%d %H:%M')]).axis(
-                        labels=True
+                    labels=True
                     ),
         x2 = 'EndDate:T',
         y = alt.Y('duration:N', title='Duration'),
@@ -427,7 +467,10 @@ for reservoirName in ["ORO","NBB"]:
     ).mark_rule(color="gray").encode(
         x="date:T",
         opacity=when_near.then(alt.value(0.3)).otherwise(alt.value(0)),
-        tooltip=[alt.Tooltip(c, type="quantitative", format=".0f") for c in [f'{reservoirName}-OUT', f'{reservoirName}-IN', 'ID0', 'ID1', 'ID3-PERFECT']],
+        tooltip=[
+            alt.Tooltip(c, type="quantitative", format=".0f") 
+                for c in [f'{reservoirName}-OUT', f'{reservoirName}-IN', 'ID0', 'ID1', 'ID3-PERFECT']
+            ] + [alt.Tooltip('date:T', type = 'temporal', format = '%Y-%m-%d %H:%M')], # Add date tooltip
     ).add_params(nearest)
 
 
@@ -469,28 +512,28 @@ for reservoirName in ["ORO","NBB"]:
 
 
 leftPlot = alt.vconcat(
-    graphics["ORO"]['elev'].properties(height=200).interactive(),
-    graphics["NBB"]['elev'].properties(height=200).interactive(),
-    graphics["ORO"]['duration'].properties(height=100),
-    graphics["NBB"]['duration'].properties(height=100),
+    graphics["ORO"]['elev'].properties(height=150).interactive(),
+    graphics["NBB"]['elev'].properties(height=150).interactive(),
+    graphics["ORO"]['duration'].properties(height=75),
+    graphics["NBB"]['duration'].properties(height=75),
 ).resolve_scale(
     x='shared', color='independent', strokeDash='independent'
 )
 
 rightPlot = alt.vconcat(
-    graphics["ORO"]['flow'].properties(height=200).interactive(),
-    graphics["NBB"]['flow'].properties(height=200).interactive(),
-    graphics['yuba'].properties(height=100),
-    graphics['mary'].properties(height=100),
-    graphics['confluence'].properties(height=100),
-    graphics['nicolaus'].properties(height=100),   
+    graphics["ORO"]['flow'].properties(height=150).interactive(),
+    graphics["NBB"]['flow'].properties(height=150).interactive(),
+    graphics['yuba'].properties(height=75),
+    graphics['mary'].properties(height=75),
+    graphics['confluence'].properties(height=75),
+    graphics['nicolaus'].properties(height=75),   
 ).resolve_scale(
     x='shared', color='independent', strokeDash='independent'
 )
 
 
 
-st.set_page_config(layout="wide")
+st.set_page_config(layout="wide", page_title="EST Simulation Plots")
 
 # st.altair_chart(merge_plot)
 # # Create two columns
