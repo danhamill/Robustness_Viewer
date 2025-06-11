@@ -512,8 +512,8 @@ for reservoirName in ["ORO","NBB"]:
 
 
 leftPlot = alt.vconcat(
-    graphics["ORO"]['elev'].properties(height=150).interactive(),
-    graphics["NBB"]['elev'].properties(height=150).interactive(),
+    graphics["ORO"]['elev'].properties(height=200).interactive(),
+    graphics["NBB"]['elev'].properties(height=200).interactive(),
     graphics["ORO"]['duration'].properties(height=75),
     graphics["NBB"]['duration'].properties(height=75),
 ).resolve_scale(
