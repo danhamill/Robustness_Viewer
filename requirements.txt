@@ -1,0 +1,4 @@
+streamlit-nightly==1.45.2.dev20250610
+pandas
+pyarrow
+altair
