@@ -210,7 +210,7 @@ pattern_year_options = [1986, 1997]
 alternative_est_options = [3]
 pct_options = list(range(5, 100, 5))
 arcSpillwayConfiguation_options = ["With", "Without"]
-datasets_options = ['HDR_proposals','FVA_onfig']
+datasets_options = ['HDR_proposals','FVA_config']
 
 # Create the sidebar dropdowns
 with st.sidebar:
